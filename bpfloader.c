@@ -22,8 +22,8 @@ return 1;
 
 bpf_object__for_each_program(prog,obj){
 const char *sec = bpf_program__section_name(prog);
-if (strcmp(sec,"tracepoint/syscalls/sys_enter_bpf") == 0) {
-	link = bpf_program__attach_tracepoint(prog,"syscalls","sys_enter_bpf");
+if (strcmp(sec,"tp/syscalls/sys_exit_bpf") == 0) {
+	link = bpf_program__attach_tracepoint(prog,"syscalls","sys_exit_bpf");
 	if(!link){
 	     fprintf(stderr,"failed att");
 		return 1;
