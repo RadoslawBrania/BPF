@@ -8,7 +8,8 @@
 # Configuration - CUSTOMIZE THESE VALUES
 WHITELIST_FILE="whitelist.txt"
 SEARCH_PATTERN="SEARCH_PATTERN_PLACEHOLDER"  # e.g., "load", "module_load", "bpf_prog_load"
-PROGRAM_NAME_PATTERN="PROGRAM_NAME_PATTERN_PLACEHOLDER"  # e.g., 'comm="([^"]+)"' for regex extraction
+BPF_PROGRAM_NAME_PATTERN='^[^[:space:]]+'  # For BPF: extracts first word in line
+AUDIT_PROGRAM_NAME_PATTERN='proctitle="([^"]+)"'  # For Audit: extracts proctitle="title"
 BUFFER_SECONDS=5  # Time window for log comparison
 TEMP_DIR="/tmp/log_monitor_$$"
 BPF_LOG="$TEMP_DIR/bpf.log"
@@ -34,7 +35,8 @@ fi
 setup() {
     echo -e "${GREEN}[INFO]${NC} Starting Log Monitor..."
     echo -e "${BLUE}[INFO]${NC} Search pattern: $SEARCH_PATTERN"
-    echo -e "${BLUE}[INFO]${NC} Program name pattern: $PROGRAM_NAME_PATTERN"
+    echo -e "${BLUE}[INFO]${NC} BPF program name pattern: $BPF_PROGRAM_NAME_PATTERN"
+    echo -e "${BLUE}[INFO]${NC} Audit program name pattern: $AUDIT_PROGRAM_NAME_PATTERN"
     echo -e "${BLUE}[INFO]${NC} Whitelist file: $WHITELIST_FILE"
     echo -e "${BLUE}[INFO]${NC} Buffer seconds: $BUFFER_SECONDS"
     echo ""
@@ -75,16 +77,22 @@ load_whitelist() {
 # Extract program name from log line
 extract_program_name() {
     local log_line="$1"
-    # Use the program name pattern to extract the program name
-    # This is a placeholder - adjust based on your log format
-    # Example: extract from comm="program_name" format
-    echo "$log_line" | grep -oP "$PROGRAM_NAME_PATTERN" | head -1
+    local source="$2"  # "BPF" or "AUDIT"
+    
+    if [[ "$source" == "BPF" ]]; then
+        # For BPF: extract first word in line
+        echo "$log_line" | grep -oP "$BPF_PROGRAM_NAME_PATTERN" | head -1
+    elif [[ "$source" == "AUDIT" ]]; then
+        # For Audit: extract from proctitle="title" format
+        echo "$log_line" | grep -oP "$AUDIT_PROGRAM_NAME_PATTERN" | head -1 | sed 's/proctitle="//;s/"//'
+    fi
 }
 
 # Check if program is whitelisted
 is_whitelisted() {
     local log_line="$1"
-    local program_name=$(extract_program_name "$log_line")
+    local source="$2"  # "BPF" or "AUDIT"
+    local program_name=$(extract_program_name "$log_line" "$source")
     
     if [[ -n "$program_name" ]]; then
         while IFS= read -r whitelisted; do
@@ -131,7 +139,7 @@ monitor_bpf_tracepipe() {
     
     cat /sys/kernel/debug/tracing/trace_pipe 2>/dev/null | grep -i "$SEARCH_PATTERN" | while IFS= read -r line; do
         # Check if whitelisted
-        if ! is_whitelisted "$line"; then
+        if ! is_whitelisted "$line" "BPF"; then
             # Alert on load operation
             alert_load_operation "BPF" "$line"
         fi
@@ -147,7 +155,7 @@ monitor_auditd() {
     
     tail -F /var/log/audit/audit.log 2>/dev/null | grep -i "$SEARCH_PATTERN" | while IFS= read -r line; do
         # Check if whitelisted
-        if ! is_whitelisted "$line"; then
+        if ! is_whitelisted "$line" "AUDIT"; then
             # Alert on load operation
             alert_load_operation "AUDIT" "$line"
         fi
