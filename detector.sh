@@ -1,8 +1,8 @@
 #!/bin/bash
 
 ###########################################
-# Log Monitor - Compare BPF tracepipe and auditd logs
-# Monitors for load operations and reports discrepancies
+# Log Monitor - Alternative Version (No Grep Buffering)
+# Processes filtering in bash to avoid pipe buffering issues
 ###########################################
 
 # Configuration - CUSTOMIZE THESE VALUES
@@ -27,16 +27,16 @@ NC='\033[0m' # No Color
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}[ERROR]${NC} This script requires root privileges to read BPF tracepipe and audit logs."
-   echo -e "${BLUE}[INFO]${NC} Please run with: sudo bash log_monitor.sh"
+   echo -e "${BLUE}[INFO]${NC} Please run with: sudo bash log_monitor_alt.sh"
    exit 1
 fi
 
 # Setup
 setup() {
-    echo -e "${GREEN}[INFO]${NC} Starting Log Monitor..."
-    echo -e "${BLUE}[INFO]${NC} Search pattern: $SEARCH_PATTERN"
-    echo -e "${BLUE}[INFO]${NC} BPF program name pattern: $BPF_PROGRAM_NAME_PATTERN"
-    echo -e "${BLUE}[INFO]${NC} Audit program name pattern: $AUDIT_PROGRAM_NAME_PATTERN"
+    echo -e "${GREEN}[INFO]${NC} Starting Log Monitor (Alternative - No Grep Buffering)..."
+    echo -e "${BLUE}[INFO]${NC} Search pattern: '$SEARCH_PATTERN'"
+    echo -e "${BLUE}[INFO]${NC} BPF program name pattern: '$BPF_PROGRAM_NAME_PATTERN'"
+    echo -e "${BLUE}[INFO]${NC} Audit program name pattern: '$AUDIT_PROGRAM_NAME_PATTERN'"
     echo -e "${BLUE}[INFO]${NC} Whitelist file: $WHITELIST_FILE"
     echo -e "${BLUE}[INFO]${NC} Buffer seconds: $BUFFER_SECONDS"
     echo ""
@@ -133,35 +133,57 @@ normalize_log_entry() {
         sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+# Check if line matches pattern (case-insensitive)
+matches_pattern() {
+    local line="$1"
+    local pattern="$2"
+    
+    # Convert both to lowercase for case-insensitive match
+    local line_lower=$(echo "$line" | tr '[:upper:]' '[:lower:]')
+    local pattern_lower=$(echo "$pattern" | tr '[:upper:]' '[:lower:]')
+    
+    [[ "$line_lower" == *"$pattern_lower"* ]]
+}
+
 # Monitor BPF tracepipe
 monitor_bpf_tracepipe() {
     echo -e "${GREEN}[INFO]${NC} Starting BPF tracepipe monitor..."
+    echo -e "${BLUE}[INFO]${NC} Reading directly from trace_pipe (no grep buffering)"
     
-    cat /sys/kernel/debug/tracing/trace_pipe 2>/dev/null | grep -i "$SEARCH_PATTERN" | while IFS= read -r line; do
-        # Check if whitelisted
-        if ! is_whitelisted "$line" "BPF"; then
-            # Alert on load operation
-            alert_load_operation "BPF" "$line"
+    # Read directly from trace_pipe, filter in bash
+    while IFS= read -r line; do
+        # Check if line matches our search pattern
+        if matches_pattern "$line" "$SEARCH_PATTERN"; then
+            # Check if whitelisted
+            if ! is_whitelisted "$line" "BPF"; then
+                # Alert on load operation
+                alert_load_operation "BPF" "$line"
+            fi
+            
+            # Store entry with timestamp
+            echo "$(date +%s)|$line" >> "$BPF_LOG"
         fi
-        
-        # Store entry with timestamp
-        echo "$(date +%s)|$line" >> "$BPF_LOG"
-    done
+    done < /sys/kernel/debug/tracing/trace_pipe
 }
 
 # Monitor auditd
 monitor_auditd() {
     echo -e "${GREEN}[INFO]${NC} Starting auditd monitor..."
+    echo -e "${BLUE}[INFO]${NC} Reading directly from audit.log (no grep buffering)"
     
-    tail -F /var/log/audit/audit.log 2>/dev/null | grep -i "$SEARCH_PATTERN" | while IFS= read -r line; do
-        # Check if whitelisted
-        if ! is_whitelisted "$line" "AUDIT"; then
-            # Alert on load operation
-            alert_load_operation "AUDIT" "$line"
+    # Follow audit log, filter in bash
+    tail -F /var/log/audit/audit.log 2>/dev/null | while IFS= read -r line; do
+        # Check if line matches our search pattern
+        if matches_pattern "$line" "$SEARCH_PATTERN"; then
+            # Check if whitelisted
+            if ! is_whitelisted "$line" "AUDIT"; then
+                # Alert on load operation
+                alert_load_operation "AUDIT" "$line"
+            fi
+            
+            # Store entry with timestamp
+            echo "$(date +%s)|$line" >> "$AUDIT_LOG"
         fi
-        
-        # Store entry with timestamp
-        echo "$(date +%s)|$line" >> "$AUDIT_LOG"
     done
 }
 
@@ -273,6 +295,7 @@ main() {
     compare_logs &
     
     echo -e "${GREEN}[INFO]${NC} All monitors started. Press Ctrl+C to stop."
+    echo -e "${BLUE}[INFO]${NC} This version processes filtering in bash (no grep pipe buffering)"
     echo ""
     
     # Wait for all background processes
