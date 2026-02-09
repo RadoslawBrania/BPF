@@ -14,6 +14,8 @@ BUFFER_SECONDS=5  # Time window for log comparison
 TEMP_DIR="/tmp/log_monitor_$$"
 BPF_LOG="$TEMP_DIR/bpf.log"
 AUDIT_LOG="$TEMP_DIR/audit.log"
+BPF_NORMALIZED="$TEMP_DIR/bpf_normalized.log"
+AUDIT_NORMALIZED="$TEMP_DIR/audit_normalized.log"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -107,15 +109,32 @@ is_whitelisted() {
 alert_load_operation() {
     local source="$1"
     local log_line="$2"
+    local program_name="$3"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     echo ""
     echo "================================================================================"
     echo -e "${RED}[ALERT]${NC} Load operation detected from $source"
     echo -e "${BLUE}[TIME]${NC} $timestamp"
+    if [[ -n "$program_name" ]]; then
+        echo -e "${BLUE}[PROGRAM]${NC} $program_name"
+    fi
     echo -e "${BLUE}[LOG]${NC} $log_line"
     echo "================================================================================"
     echo ""
+}
+
+# Normalize log entry for comparison
+normalize_log_entry() {
+    local log_line="$1"
+    # Remove timestamps and source-specific prefixes
+    # Adjust based on your specific log format
+    echo "$log_line" | \
+        sed 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}//g' | \
+        sed 's/[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}//g' | \
+        sed 's/^[[:space:]]*[^[:space:]]*[[:space:]]*[0-9]*[[:space:]]*//' | \
+        tr '[:upper:]' '[:lower:]' | \
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 # Check if line matches pattern (case-insensitive)
@@ -139,10 +158,13 @@ monitor_bpf_tracepipe() {
     while IFS= read -r line; do
         # Check if line matches our search pattern
         if matches_pattern "$line" "$SEARCH_PATTERN"; then
+            # Extract program name
+            local program_name=$(extract_program_name "$line" "BPF")
+            
             # Check if whitelisted
             if ! is_whitelisted "$line" "BPF"; then
-                # Alert on load operation
-                alert_load_operation "BPF" "$line"
+                # Alert on load operation with program name
+                alert_load_operation "BPF" "$line" "$program_name"
             fi
             
             # Store entry with timestamp
@@ -160,121 +182,17 @@ monitor_auditd() {
     tail -F /var/log/audit/audit.log 2>/dev/null | while IFS= read -r line; do
         # Check if line matches our search pattern
         if matches_pattern "$line" "$SEARCH_PATTERN"; then
+            # Extract program name
+            local program_name=$(extract_program_name "$line" "AUDIT")
+            
             # Check if whitelisted
             if ! is_whitelisted "$line" "AUDIT"; then
-                # Alert on load operation
-                alert_load_operation "AUDIT" "$line"
+                # Alert on load operation with program name
+                alert_load_operation "AUDIT" "$line" "$program_name"
             fi
             
             # Store entry with timestamp
             echo "$(date +%s)|$line" >> "$AUDIT_LOG"
-        fi
-    done
-}
-
-# Compare logs and report discrepancies
-compare_logs() {
-    echo -e "${GREEN}[INFO]${NC} Starting log comparison thread..."
-    
-    local bpf_count_file="$TEMP_DIR/bpf_program_counts.txt"
-    local audit_count_file="$TEMP_DIR/audit_program_counts.txt"
-    
-    while true; do
-        sleep "$BUFFER_SECONDS"
-        
-        local current_time=$(date +%s)
-        local cutoff_time=$((current_time - (BUFFER_SECONDS * 2)))
-        
-        # Clear count files
-        > "$bpf_count_file"
-        > "$audit_count_file"
-        
-        # Count loads per program in BPF log
-        if [[ -f "$BPF_LOG" ]]; then
-            while IFS='|' read -r timestamp log_line; do
-                if [[ $timestamp -ge $cutoff_time ]]; then
-                    local program_name=$(extract_program_name "$log_line" "BPF")
-                    if [[ -n "$program_name" ]]; then
-                        local current_count=0
-                        if grep -q "^${program_name}=" "$bpf_count_file" 2>/dev/null; then
-                            current_count=$(grep "^${program_name}=" "$bpf_count_file" | cut -d'=' -f2)
-                            grep -v "^${program_name}=" "$bpf_count_file" > "${bpf_count_file}.tmp"
-                            mv "${bpf_count_file}.tmp" "$bpf_count_file"
-                        fi
-                        echo "${program_name}=$((current_count + 1))" >> "$bpf_count_file"
-                    fi
-                fi
-            done < "$BPF_LOG"
-        fi
-        
-        # Count loads per program in AUDIT log
-        if [[ -f "$AUDIT_LOG" ]]; then
-            while IFS='|' read -r timestamp log_line; do
-                if [[ $timestamp -ge $cutoff_time ]]; then
-                    local program_name=$(extract_program_name "$log_line" "AUDIT")
-                    if [[ -n "$program_name" ]]; then
-                        local current_count=0
-                        if grep -q "^${program_name}=" "$audit_count_file" 2>/dev/null; then
-                            current_count=$(grep "^${program_name}=" "$audit_count_file" | cut -d'=' -f2)
-                            grep -v "^${program_name}=" "$audit_count_file" > "${audit_count_file}.tmp"
-                            mv "${audit_count_file}.tmp" "$audit_count_file"
-                        fi
-                        echo "${program_name}=$((current_count + 1))" >> "$audit_count_file"
-                    fi
-                fi
-            done < "$AUDIT_LOG"
-        fi
-        
-        # Get all unique program names
-        local all_programs=$(cat "$bpf_count_file" "$audit_count_file" 2>/dev/null | cut -d'=' -f1 | sort -u)
-        
-        if [[ -z "$all_programs" ]]; then
-            continue
-        fi
-        
-        # Compare counts
-        echo ""
-        echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        echo -e "${YELLOW}[COMPARISON]${NC} Load count comparison (last $((BUFFER_SECONDS * 2))s)"
-        echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        
-        while IFS= read -r program; do
-            local bpf_count=0
-            local audit_count=0
-            
-            if grep -q "^${program}=" "$bpf_count_file" 2>/dev/null; then
-                bpf_count=$(grep "^${program}=" "$bpf_count_file" | cut -d'=' -f2)
-            fi
-            
-            if grep -q "^${program}=" "$audit_count_file" 2>/dev/null; then
-                audit_count=$(grep "^${program}=" "$audit_count_file" | cut -d'=' -f2)
-            fi
-            
-            local diff=$((bpf_count - audit_count))
-            
-            if [[ $diff -ne 0 ]]; then
-                if [[ $diff -gt 0 ]]; then
-                    echo -e "${RED}[DISCREPANCY]${NC} ${program}: BPF=$bpf_count, AUDIT=$audit_count (BPF +$diff)"
-                else
-                    echo -e "${RED}[DISCREPANCY]${NC} ${program}: BPF=$bpf_count, AUDIT=$audit_count (AUDIT +$((-diff)))"
-                fi
-            else
-                echo -e "${GREEN}[MATCH]${NC} ${program}: BPF=$bpf_count, AUDIT=$audit_count"
-            fi
-        done <<< "$all_programs"
-        
-        echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-        echo ""
-        
-        # Clean up old entries
-        if [[ -f "$BPF_LOG" ]]; then
-            grep -E "^[0-9]+\|" "$BPF_LOG" | awk -F'|' -v cutoff="$cutoff_time" '$1 >= cutoff' > "${BPF_LOG}.tmp"
-            mv "${BPF_LOG}.tmp" "$BPF_LOG"
-        fi
-        
-        if [[ -f "$AUDIT_LOG" ]]; then
-            grep -E "^[0-9]+\|" "$AUDIT_LOG" | awk -F'|' -v cutoff="$cutoff_time" '$1 >= cutoff' > "${AUDIT_LOG}.tmp"
-            mv "${AUDIT_LOG}.tmp" "$AUDIT_LOG"
         fi
     done
 }
