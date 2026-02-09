@@ -222,7 +222,6 @@ main() {
     # Start monitoring processes in background
     monitor_bpf_tracepipe &
     monitor_auditd &
-    compare_logs &
     
     echo -e "${GREEN}[INFO]${NC} All monitors started. Press Ctrl+C to stop."
     echo -e "${BLUE}[INFO]${NC} This version processes filtering in bash (no grep pipe buffering)"
